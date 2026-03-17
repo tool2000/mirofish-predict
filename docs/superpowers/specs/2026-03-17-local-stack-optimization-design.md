@@ -46,11 +46,17 @@ MiroFish의 Zep Cloud 의존성을 완전히 제거하고, **kg-gen + Kuzu DB** 
 - `services/local_graph_memory_updater.py` — 시뮬레이션 액션을 Kuzu에 기록
 
 **수정:**
-- `config.py` — ZEP_API_KEY 제거, KUZU_DB_DIR / KGGEN_MODEL 추가
+- `config.py` — ZEP_API_KEY 제거, KUZU_DB_DIR / KGGEN_MODEL 추가, `validate()` 수정
 - `api/graph.py` — GraphBuilderService → LocalGraphService
-- `api/simulation.py` — ZepEntityReader → LocalGraphService
+- `api/simulation.py` — `ZepEntityReader` → `LocalGraphService` (5곳 참조)
+- `api/report.py` — `ZepToolsService` → `LocalGraphToolsService` (2곳 참조)
 - `services/oasis_profile_generator.py` — Zep 의존 제거, LocalGraphService 주입
-- `services/report_agent.py` — ZepTools → LocalGraphTools
+- `services/report_agent.py` — `ZepToolsService` → `LocalGraphToolsService`
+- `services/simulation_manager.py` — `ZepEntityReader` import → `LocalGraphService`
+- `services/simulation_runner.py` — `ZepGraphMemoryManager` → `LocalGraphMemoryManager`
+- `services/simulation_config_generator.py` — `ZepEntityReader` import → `LocalGraphService`
+- `services/ontology_generator.py` — Zep ontology import 참조 문자열 제거
+- `services/__init__.py` — 모든 Zep 관련 import/export를 새 모듈명으로 교체
 - `scripts/run_twitter_simulation.py` — 계층적 에이전트 + 수렴 조기종료
 - `scripts/run_reddit_simulation.py` — 동일
 - `scripts/run_parallel_simulation.py` — 동일
@@ -78,6 +84,8 @@ CREATE REL TABLE RELATES_TO (
 
 - `graph_id`로 프로젝트별 그래프를 단일 DB 안에서 구분
 - `attributes`는 JSON 직렬화 문자열
+- Kuzu REL TABLE은 PRIMARY KEY를 지원하지 않음 — 관계 중복 방지는 애플리케이션 레이어에서 처리
+- 기존 Zep의 시간 메타데이터(`valid_at`, `invalid_at`, `expired_at`)는 로컬 스택에서 불필요 — 해당 필드는 `get_graph_data()` 반환 시 `None`으로 채움
 
 ### 1.4 LocalGraphService Interface
 
@@ -99,13 +107,20 @@ class LocalGraphService:
                     progress_callback=None) -> str:
         """
         텍스트 → kg-gen으로 엔터티/관계 추출 → Kuzu에 저장.
+        동기 메서드. 기존 api/graph.py의 build_task() 클로저 내에서 호출됨.
+        progress_callback(message: str, progress_ratio: float)으로 진행률 보고.
+
         흐름:
-        1. TextProcessor.split_text()로 청킹
-        2. 각 청크에 kg-gen.generate() 호출
-        3. kg-gen.aggregate()로 병합
-        4. kg-gen.cluster()로 동일 엔터티 통합
-        5. Kuzu INSERT (Entity 노드 + RELATES_TO 엣지)
+        1. TextProcessor.split_text()로 청킹 → progress 5-10%
+        2. 각 청크에 kg-gen.generate() 호출 → progress 10-60%
+           (ontology의 entity_types를 kg-gen context 문자열로 변환하여 전달)
+        3. kg-gen.aggregate()로 병합 → progress 60-70%
+        4. kg-gen.cluster()로 동일 엔터티 통합 → progress 70-80%
+        5. Kuzu INSERT (Entity 노드 + RELATES_TO 엣지) → progress 80-95%
         반환: graph_id
+
+        ontology 변환: 기존 Zep 포맷의 ontology dict를 kg-gen의 context 문자열로 변환.
+        예: entity_types=[{name:"student",...}] → "Focus on entities: student, professor, ..."
         """
 
     def get_graph_info(self, graph_id) -> GraphInfo:
@@ -138,11 +153,26 @@ class LocalGraphService:
     # === OasisProfileGenerator용 검색 (Zep 하이브리드 검색 대체) ===
     def search_entity_context(self, graph_id, entity_name) -> dict:
         """
-        Cypher로 2-hop 이웃 탐색.
-        MATCH (n:Entity)-[r:RELATES_TO]-(m:Entity)
+        Cypher로 2-hop 이웃 탐색 (방향 쿼리 2회로 양방향 커버).
+        Kuzu는 비방향 패턴을 지원하지 않으므로 UNION ALL 사용:
+
+        MATCH (n:Entity)-[r:RELATES_TO]->(m:Entity)
         WHERE n.graph_id = $gid AND n.name = $name
         RETURN r.fact, m.name, m.summary
+        UNION ALL
+        MATCH (m:Entity)-[r:RELATES_TO]->(n:Entity)
+        WHERE n.graph_id = $gid AND n.name = $name
+        RETURN r.fact, m.name, m.summary
+
         반환: {"facts": [...], "node_summaries": [...], "context": "..."}
+        """
+
+    # === Kuzu 커넥션 관리 ===
+    def get_connection(self) -> "kuzu.Connection":
+        """
+        스레드 안전한 커넥션 반환.
+        Kuzu Connection은 스레드 안전하지 않으므로 threading.local()로 관리.
+        각 스레드가 자신만의 Connection 인스턴스를 사용한다.
         """
 ```
 
@@ -153,26 +183,41 @@ class LocalGraphService:
 리포트 에이전트(`report_agent.py`)에서 사용하는 3가지 도구를 Cypher 기반으로 재구현한다.
 
 ```python
-class LocalGraphTools:
-    def __init__(self, graph_service: LocalGraphService, llm_client: LLMClient):
-        self.graph_service = graph_service
-        self.llm_client = llm_client
+class LocalGraphToolsService:
+    """기존 ZepToolsService 완전 대체. report_agent.py가 사용하는 모든 메서드를 포함."""
 
+    def __init__(self, graph_service: LocalGraphService = None, llm_client: LLMClient = None):
+        self.graph_service = graph_service or LocalGraphService(...)
+        self.llm_client = llm_client or LLMClient(...)
+
+    # === 핵심 분석 도구 (report_agent._execute_tool에서 호출) ===
     def insight_forge(self, query, graph_id, simulation_requirement) -> InsightForgeResult:
-        """
-        1. LLM으로 query를 3개 서브쿼리로 분해
-        2. 각 서브쿼리 키워드로 Cypher CONTAINS 검색
-        3. 결과를 InsightForgeResult로 조합
-        """
+        """LLM 서브쿼리 분해 + Cypher CONTAINS 검색"""
 
     def panorama_search(self, query, graph_id) -> PanoramaResult:
         """전체 노드/엣지 스캔 + 키워드 필터링"""
 
     def quick_search(self, query, graph_id) -> SearchResult:
         """단순 키워드 검색, LIMIT 20"""
+
+    # === 보조 도구 (report_agent에서 추가 호출) ===
+    def interview_agents(self, graph_id, simulation_id, agent_ids, prompt) -> InterviewResult:
+        """OASIS IPC를 통한 에이전트 인터뷰. 기존 구현 유지 (IPC 기반, Zep 무관)."""
+
+    def get_graph_statistics(self, graph_id) -> dict:
+        """그래프 통계 (노드 수, 엣지 수, 엔터티 타입별 분포)"""
+
+    def get_entity_summary(self, graph_id, entity_name) -> str:
+        """특정 엔터티의 요약 정보 반환"""
+
+    def get_entities_by_type(self, graph_id, entity_type) -> list:
+        """타입별 엔터티 목록 반환"""
+
+    def get_simulation_context(self, graph_id, simulation_requirement) -> str:
+        """시뮬레이션 컨텍스트 요약 문자열 생성"""
 ```
 
-반환 타입(`InsightForgeResult`, `PanoramaResult`, `SearchResult`)은 기존 것을 `local_graph_tools.py`에 재정의한다 (`.to_text()` 메서드 포함).
+반환 타입(`InsightForgeResult`, `PanoramaResult`, `SearchResult`, `InterviewResult`, `NodeInfo`, `EdgeInfo`)은 기존 데이터클래스를 `local_graph_tools.py`에 재정의한다 (`.to_text()` 메서드 포함). `EdgeInfo`의 `is_expired`/`is_invalid` 프로퍼티는 항상 `False`를 반환한다 (시간 메타데이터 없음).
 
 ### 1.6 LocalGraphMemoryUpdater
 
@@ -195,7 +240,24 @@ class LocalGraphMemoryUpdater:
 
 `AgentActivity` 데이터클래스, `LocalGraphMemoryManager` 싱글턴은 기존 구조 유지.
 
-### 1.7 OasisProfileGenerator 수정
+### 1.7 LocalGraphMemoryUpdater Action Mapping
+
+12가지 액션 타입의 Kuzu 기록 매핑:
+
+| 액션 타입 | Kuzu 기록 방식 |
+|-----------|---------------|
+| CREATE_POST | 새 엣지: agent -[POSTED {fact=content}]-> topic_entity |
+| CREATE_COMMENT | 새 엣지: agent -[COMMENTED {fact=content}]-> post_entity |
+| LIKE_POST / DISLIKE_POST | 새 엣지: agent -[REACTED {fact=like/dislike}]-> post_entity |
+| REPOST / QUOTE_POST | 새 엣지: agent -[SHARED {fact=quote}]-> original_post_entity |
+| FOLLOW / MUTE | 새 엣지: agent -[SOCIAL {fact=follow/mute}]-> target_agent |
+| LIKE_COMMENT / DISLIKE_COMMENT | 새 엣지: agent -[REACTED {fact=like/dislike}]-> comment_entity |
+| SEARCH_POSTS / SEARCH_USER | 기록하지 않음 (그래프 변화 없음) |
+| DO_NOTHING | 기록하지 않음 (기존과 동일) |
+
+시뮬레이션 중 생성되는 콘텐츠(게시글, 댓글)는 임시 Entity 노드로 추가하여 관계 그래프를 확장한다.
+
+### 1.8 OasisProfileGenerator 수정
 
 - `from zep_cloud.client import Zep` → 제거
 - `from .local_graph_service import LocalGraphService` 추가
@@ -203,7 +265,7 @@ class LocalGraphMemoryUpdater:
 - `_search_zep_for_entity()` → `self.graph_service.search_entity_context()` 호출
 - `_build_entity_context()` 4단계 중 마지막 Zep 검색 → Kuzu 검색으로 교체
 
-### 1.8 Config Changes
+### 1.9 Config Changes
 
 ```python
 class Config:
@@ -225,9 +287,38 @@ class Config:
     # 수렴 조기종료
     CONVERGENCE_THRESHOLD = float(os.environ.get('CONVERGENCE_THRESHOLD', '0.05'))
     CONVERGENCE_CHECK_INTERVAL = int(os.environ.get('CONVERGENCE_CHECK_INTERVAL', '5'))
+
+    @classmethod
+    def validate(cls):
+        """필수 설정 검증 — ZEP_API_KEY 체크 제거, KUZU_DB_DIR 체크 추가"""
+        errors = []
+        if not cls.LLM_API_KEY:
+            errors.append("LLM_API_KEY가 설정되지 않았습니다.")
+        # KUZU_DB_DIR은 기본값이 있으므로 검증 불필요
+        return errors
 ```
 
-### 1.9 Dependencies
+### 1.9.1 Thread Safety — Kuzu Connection
+
+Kuzu의 `Connection`은 스레드 안전하지 않다. `LocalGraphService`는 `threading.local()`을 사용하여 스레드별 커넥션을 관리한다:
+
+```python
+import threading
+
+class LocalGraphService:
+    def __init__(self, db_dir):
+        self.db = kuzu.Database(db_dir)  # Database 객체는 스레드 안전
+        self._local = threading.local()
+
+    def get_connection(self):
+        if not hasattr(self._local, 'conn'):
+            self._local.conn = kuzu.Connection(self.db)
+        return self._local.conn
+```
+
+이 패턴은 `OasisProfileGenerator`의 `ThreadPoolExecutor`(5 workers)와 `LocalGraphMemoryUpdater`의 워커 스레드에서 안전하게 동작한다.
+
+### 1.10 Dependencies
 
 ```toml
 # 제거

@@ -16,8 +16,9 @@ dependencies = [
     # LLM 관련
     "openai>=1.0.0",
     
-    # Zep Cloud
-    "zep-cloud==3.13.0",
+    # Knowledge Graph (local)
+    "kg-gen>=0.1.0",
+    "kuzu>=0.11.0",
     
     # OASIS 소셜 미디어 시뮬레이션
     "camel-oasis==0.2.5",

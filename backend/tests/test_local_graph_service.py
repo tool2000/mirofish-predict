@@ -5,6 +5,7 @@ Kuzu DB 기반 엔터티 읽기/쿼리 동작을 검증한다.
 
 import json
 import pytest
+from unittest.mock import patch, MagicMock, PropertyMock
 
 import sys
 import importlib
@@ -425,3 +426,162 @@ class TestDataclassContracts:
         assert isinstance(d["entity_types"], list)
         assert d["total_count"] == 4
         assert d["filtered_count"] == 3
+
+
+# ------------------------------------------------------------------
+# build_graph 테스트 (kg-gen 모킹)
+# ------------------------------------------------------------------
+
+
+def _make_mock_kg():
+    """kg-gen KGGen 목 객체를 생성한다."""
+    mock_graph = MagicMock()
+    mock_graph.entities = {"Alice", "Bob"}
+    mock_graph.relations = {("Alice", "studies_under", "Bob")}
+
+    mock_kg = MagicMock()
+    mock_kg.generate.return_value = mock_graph
+    mock_kg.aggregate.return_value = mock_graph
+    mock_kg.cluster.return_value = mock_graph
+    return mock_kg, mock_graph
+
+
+class TestLocalGraphServiceBuild:
+    """build_graph 메서드 테스트."""
+
+    def test_build_graph_from_text(self, tmp_kuzu_db):
+        """build_graph가 엔터티와 엣지를 Kuzu에 생성한다."""
+        tmp_dir, db, conn = tmp_kuzu_db
+        svc = _make_service(tmp_dir)
+
+        mock_kg, mock_graph = _make_mock_kg()
+
+        with patch.object(type(svc), "kg", new_callable=PropertyMock, return_value=mock_kg):
+            ontology = {
+                "entity_types": [{"name": "student"}, {"name": "professor"}],
+            }
+            graph_id = svc.build_graph(
+                text="Alice studies under Bob.",
+                ontology=ontology,
+            )
+
+        assert graph_id.startswith("mirofish_")
+
+        nodes = svc.get_all_nodes(graph_id)
+        assert len(nodes) == 2
+
+        names = {n["name"] for n in nodes}
+        assert "Alice" in names
+        assert "Bob" in names
+
+        info = svc.get_graph_info(graph_id)
+        assert info.edge_count == 1
+
+    def test_build_graph_progress_callback(self, tmp_kuzu_db):
+        """progress_callback이 빌드 중 호출된다."""
+        tmp_dir, db, conn = tmp_kuzu_db
+        svc = _make_service(tmp_dir)
+
+        mock_kg, _ = _make_mock_kg()
+        calls = []
+
+        def callback(msg, ratio):
+            calls.append((msg, ratio))
+
+        with patch.object(type(svc), "kg", new_callable=PropertyMock, return_value=mock_kg):
+            svc.build_graph(
+                text="Alice studies under Bob.",
+                ontology={"entity_types": []},
+                progress_callback=callback,
+            )
+
+        assert len(calls) >= 4  # 분할, 청크 처리, 병합, 완료 등
+        # 비율이 단조 증가하는지 확인
+        ratios = [r for _, r in calls]
+        assert ratios == sorted(ratios)
+
+    def test_build_graph_empty_chunks(self, tmp_kuzu_db):
+        """모든 청크가 실패하고 재시도도 빈 그래프이면 graph_id만 반환된다."""
+        tmp_dir, db, conn = tmp_kuzu_db
+        svc = _make_service(tmp_dir)
+
+        mock_kg = MagicMock()
+        # generate가 entities/relations 모두 빈 그래프를 반환
+        empty_graph = MagicMock()
+        empty_graph.entities = set()
+        empty_graph.relations = set()
+        mock_kg.generate.return_value = empty_graph
+
+        with patch.object(type(svc), "kg", new_callable=PropertyMock, return_value=mock_kg):
+            graph_id = svc.build_graph(
+                text="Some text.",
+                ontology={"entity_types": []},
+            )
+
+        assert graph_id.startswith("mirofish_")
+        nodes = svc.get_all_nodes(graph_id)
+        assert len(nodes) == 0
+
+    def test_build_graph_chunk_failure_continues(self, tmp_kuzu_db):
+        """청크 처리 중 예외가 발생해도 나머지 청크를 계속 처리한다."""
+        tmp_dir, db, conn = tmp_kuzu_db
+        svc = _make_service(tmp_dir)
+
+        good_graph = MagicMock()
+        good_graph.entities = {"Entity1"}
+        good_graph.relations = set()
+
+        mock_kg = MagicMock()
+        # 첫 번째 호출은 예외, 두 번째는 성공
+        mock_kg.generate.side_effect = [Exception("LLM error"), good_graph]
+        mock_kg.aggregate.return_value = good_graph
+        mock_kg.cluster.return_value = good_graph
+
+        with patch.object(type(svc), "kg", new_callable=PropertyMock, return_value=mock_kg):
+            # 텍스트를 충분히 길게 해서 2개 청크가 생기도록
+            graph_id = svc.build_graph(
+                text="A" * 100,
+                ontology={"entity_types": []},
+                chunk_size=60,
+            )
+
+        nodes = svc.get_all_nodes(graph_id)
+        assert len(nodes) == 1
+        assert nodes[0]["name"] == "Entity1"
+
+
+class TestOntologyToContext:
+    """_ontology_to_context 헬퍼 테스트."""
+
+    def test_with_entity_and_edge_types(self, tmp_kuzu_db):
+        """엔터티 타입과 엣지 타입이 모두 포함된 컨텍스트 문자열을 생성한다."""
+        tmp_dir, db, conn = tmp_kuzu_db
+        svc = _make_service(tmp_dir)
+
+        ontology = {
+            "entity_types": [{"name": "Person"}, {"name": "Organization"}],
+            "edge_types": [{"name": "works_at"}, {"name": "manages"}],
+        }
+        ctx = svc._ontology_to_context(ontology)
+        assert "Person" in ctx
+        assert "Organization" in ctx
+        assert "works_at" in ctx
+        assert "manages" in ctx
+
+    def test_with_empty_ontology(self, tmp_kuzu_db):
+        """빈 온톨로지는 빈 문자열을 반환한다."""
+        tmp_dir, db, conn = tmp_kuzu_db
+        svc = _make_service(tmp_dir)
+
+        ctx = svc._ontology_to_context({})
+        assert ctx == ""
+
+    def test_with_entity_types_only(self, tmp_kuzu_db):
+        """엔터티 타입만 있으면 해당 부분만 포함된다."""
+        tmp_dir, db, conn = tmp_kuzu_db
+        svc = _make_service(tmp_dir)
+
+        ontology = {"entity_types": [{"name": "Animal"}]}
+        ctx = svc._ontology_to_context(ontology)
+        assert "Animal" in ctx
+        assert "relationship" not in ctx.lower()

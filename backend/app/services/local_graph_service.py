@@ -432,6 +432,214 @@ class LocalGraphService:
     # 컨텍스트 검색
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # 그래프 빌드 (kg-gen 통합)
+    # ------------------------------------------------------------------
+
+    def build_graph(
+        self,
+        text: str,
+        ontology: Dict[str, Any],
+        graph_name: str = "MiroFish Graph",
+        chunk_size: int = 5000,
+        progress_callback=None,
+    ) -> str:
+        """
+        텍스트에서 지식 그래프를 생성하고 Kuzu에 저장한다.
+
+        Flow:
+        1. graph_id 생성
+        2. TextProcessor로 텍스트 분할
+        3. 각 청크에 대해 kg.generate() 호출
+        4. kg.aggregate()로 병합
+        5. kg.cluster()로 엔터티 통합
+        6. Kuzu에 Entity 노드 + RELATES_TO 엣지 삽입
+
+        Returns: graph_id
+        """
+        import uuid as uuid_mod
+
+        graph_id = f"mirofish_{uuid_mod.uuid4().hex[:16]}"
+
+        def report(msg, ratio):
+            if progress_callback:
+                progress_callback(msg, ratio)
+
+        # 1. 텍스트 분할
+        report("텍스트 분할 중...", 0.05)
+        chunks = self._split_text(text, chunk_size=chunk_size, overlap=50)
+        if not chunks:
+            chunks = [text]
+        report(f"{len(chunks)}개 청크로 분할 완료", 0.10)
+
+        # 2. 온톨로지에서 컨텍스트 문자열 생성
+        context_str = self._ontology_to_context(ontology)
+
+        # 3. 청크별 그래프 생성
+        chunk_graphs = []
+        for i, chunk in enumerate(chunks):
+            report(
+                f"청크 {i+1}/{len(chunks)} 처리 중...",
+                0.10 + (i / len(chunks)) * 0.50,
+            )
+            try:
+                graph = self.kg.generate(input_data=chunk, context=context_str)
+                if graph and (graph.entities or graph.relations):
+                    chunk_graphs.append(graph)
+            except Exception as e:
+                # 로그 남기고 다음 청크 계속 처리
+                report(
+                    f"청크 {i+1} 처리 실패: {str(e)[:80]}",
+                    0.10 + (i / len(chunks)) * 0.50,
+                )
+
+        if not chunk_graphs:
+            # 모든 청크 실패 시 전체 텍스트로 재시도
+            report("청크 처리 실패, 전체 텍스트로 재시도...", 0.60)
+            graph = self.kg.generate(
+                input_data=text[:chunk_size], context=context_str
+            )
+            if graph:
+                chunk_graphs = [graph]
+
+        # 4. 병합
+        report("그래프 병합 중...", 0.65)
+        if len(chunk_graphs) > 1:
+            aggregated = self.kg.aggregate(chunk_graphs)
+        elif chunk_graphs:
+            aggregated = chunk_graphs[0]
+        else:
+            # 엔터티가 없으면 빈 그래프 반환
+            report("추출된 엔터티가 없습니다", 0.95)
+            return graph_id
+
+        # 5. 클러스터링(엔터티 통합)
+        report("엔터티 통합 중...", 0.75)
+        try:
+            clustered = self.kg.cluster(aggregated, context=context_str)
+        except Exception:
+            clustered = aggregated
+
+        # 6. Kuzu에 저장
+        report("Kuzu에 저장 중...", 0.80)
+        self._insert_graph_data(graph_id, clustered, ontology)
+
+        report("그래프 구축 완료", 0.95)
+        return graph_id
+
+    @staticmethod
+    def _split_text(text: str, chunk_size: int = 5000, overlap: int = 50) -> List[str]:
+        """텍스트를 청크로 분할한다 (TextProcessor 의존 없이)."""
+        if not text or not text.strip():
+            return []
+        if len(text) <= chunk_size:
+            return [text]
+        chunks: List[str] = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            if end < len(text):
+                # 문장 경계에서 분할 시도
+                for sep in [".\n", "!\n", "?\n", "\n\n", ". ", "! ", "? ", ".", "!", "?"]:
+                    last_sep = text[start:end].rfind(sep)
+                    if last_sep > chunk_size // 2:
+                        end = start + last_sep + len(sep)
+                        break
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            start = end - overlap if end < len(text) else end
+        return chunks
+
+    def _ontology_to_context(self, ontology: Dict[str, Any]) -> str:
+        """온톨로지 dict를 kg-gen 컨텍스트 문자열로 변환한다."""
+        parts = []
+        entity_types = ontology.get("entity_types", [])
+        if entity_types:
+            names = [et.get("name", "") for et in entity_types if et.get("name")]
+            if names:
+                parts.append(
+                    f"Focus on extracting these entity types: {', '.join(names)}"
+                )
+        edge_types = ontology.get("edge_types", [])
+        if edge_types:
+            names = [et.get("name", "") for et in edge_types if et.get("name")]
+            if names:
+                parts.append(
+                    f"Look for these relationship types: {', '.join(names)}"
+                )
+        return ". ".join(parts) if parts else ""
+
+    def _insert_graph_data(
+        self, graph_id: str, graph, ontology: Dict[str, Any]
+    ):
+        """kg-gen 그래프 출력을 Kuzu에 삽입한다."""
+        import uuid as uuid_mod
+        from datetime import datetime
+
+        conn = self.get_connection()
+        entity_types = {
+            et.get("name", "").lower(): et.get("name", "")
+            for et in ontology.get("entity_types", [])
+        }
+
+        # 엔터티 이름 → UUID 매핑
+        entity_uuid_map: Dict[str, str] = {}
+
+        for entity_name in graph.entities or set():
+            entity_uuid = uuid_mod.uuid4().hex[:16]
+            entity_uuid_map[entity_name] = entity_uuid
+
+            # 온톨로지 타입 매칭 시도
+            label = "Entity"
+            entity_lower = entity_name.lower()
+            for type_lower, type_orig in entity_types.items():
+                if type_lower in entity_lower or entity_lower in type_lower:
+                    label = type_orig
+                    break
+
+            conn.execute(
+                "CREATE (e:Entity {uuid: $uuid, graph_id: $gid, name: $name, "
+                "label: $label, summary: $summary, attributes: $attrs})",
+                {
+                    "uuid": entity_uuid,
+                    "gid": graph_id,
+                    "name": entity_name,
+                    "label": label,
+                    "summary": "",
+                    "attrs": "{}",
+                },
+            )
+
+        # 관계를 엣지로 삽입
+        now = datetime.now().isoformat()
+        for relation in graph.relations or set():
+            if len(relation) != 3:
+                continue
+            src_name, rel_name, tgt_name = relation
+            src_uuid = entity_uuid_map.get(src_name)
+            tgt_uuid = entity_uuid_map.get(tgt_name)
+            if not src_uuid or not tgt_uuid:
+                continue
+            fact = f"{src_name} {rel_name} {tgt_name}"
+            conn.execute(
+                "MATCH (a:Entity {uuid: $src}), (b:Entity {uuid: $tgt}) "
+                "CREATE (a)-[:RELATES_TO {relation: $rel, fact: $fact, "
+                "graph_id: $gid, created_at: $ts}]->(b)",
+                {
+                    "src": src_uuid,
+                    "tgt": tgt_uuid,
+                    "rel": rel_name,
+                    "fact": fact,
+                    "gid": graph_id,
+                    "ts": now,
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # 컨텍스트 검색
+    # ------------------------------------------------------------------
+
     def search_entity_context(
         self, graph_id: str, entity_name: str
     ) -> Dict[str, Any]:

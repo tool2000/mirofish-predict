@@ -1,16 +1,22 @@
 """Tests for tiered agents and convergence."""
 import random
 import math
+import os
+import importlib.util
 import pytest
 from collections import Counter
 
-# Import directly from the utility module
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from app.utils.action_routing import (
-    rule_based_action, compute_topic_relevance, assign_tiers,
-    compute_action_distribution, kl_divergence
-)
+# Direct import to avoid __init__.py chain issues
+_mod_path = os.path.join(os.path.dirname(__file__), "..", "app", "utils", "action_routing.py")
+_spec = importlib.util.spec_from_file_location("action_routing", _mod_path)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+
+rule_based_action = _mod.rule_based_action
+compute_topic_relevance = _mod.compute_topic_relevance
+assign_tiers = _mod.assign_tiers
+compute_action_distribution = _mod.compute_action_distribution
+kl_divergence = _mod.kl_divergence
 
 
 class TestRuleBasedAction:

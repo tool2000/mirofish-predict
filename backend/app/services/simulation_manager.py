@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from ..config import Config
+from ..config import Config, get_graph_service
 from ..utils.logger import get_logger
-from .zep_entity_reader import ZepEntityReader, FilteredEntities
+from .local_graph_service import LocalGraphService, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
 from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
 
@@ -116,7 +116,7 @@ class SimulationManager:
     시뮬레이션 매니저.
 
     핵심 기능:
-    1. Zep 그래프에서 엔터티를 조회/필터링
+    1. 로컬 그래프에서 엔터티를 조회/필터링
     2. OASIS Agent Profile 생성
     3. LLM 기반 시뮬레이션 설정값 생성
     4. 사전 제공 스크립트 실행에 필요한 파일 준비
@@ -202,7 +202,7 @@ class SimulationManager:
 
         Args:
             project_id: 프로젝트 ID
-            graph_id: Zep 그래프 ID
+            graph_id: 그래프 ID
             enable_twitter: Twitter 시뮬레이션 사용 여부
             enable_reddit: Reddit 시뮬레이션 사용 여부
 
@@ -240,7 +240,7 @@ class SimulationManager:
         시뮬레이션 환경을 자동으로 준비한다.
 
         단계:
-        1. Zep 그래프에서 엔터티 조회/필터링
+        1. 로컬 그래프에서 엔터티 조회/필터링
         2. 엔터티별 OASIS Agent Profile 생성(옵션: LLM 강화, 병렬 지원)
         3. LLM으로 시뮬레이션 설정값 생성(시간/활성도/발화 빈도 등)
         4. 설정 파일 및 Profile 파일 저장
@@ -269,10 +269,10 @@ class SimulationManager:
             
             # ========== 1단계: 엔터티 조회/필터링 ==========
             if progress_callback:
-                progress_callback("reading", 0, "Zep 그래프에 연결 중...")
-            
-            reader = ZepEntityReader()
-            
+                progress_callback("reading", 0, "로컬 그래프에 연결 중...")
+
+            reader = get_graph_service()
+
             if progress_callback:
                 progress_callback("reading", 30, "노드 데이터를 읽는 중...")
             
@@ -310,7 +310,7 @@ class SimulationManager:
                     total=total_entities
                 )
             
-            # graph_id를 전달해 Zep 검색 컨텍스트를 활성화
+            # graph_id를 전달해 로컬 그래프 검색 컨텍스트를 활성화
             generator = OasisProfileGenerator(graph_id=state.graph_id)
             
             def profile_progress(current, total, msg):
@@ -338,7 +338,7 @@ class SimulationManager:
                 entities=filtered.entities,
                 use_llm=use_llm_for_profiles,
                 progress_callback=profile_progress,
-                graph_id=state.graph_id,  # Zep 검색용 graph_id
+                graph_id=state.graph_id,  # 로컬 그래프 검색용 graph_id
                 parallel_count=parallel_profile_count,  # 병렬 생성 수
                 realtime_output_path=realtime_output_path,  # 실시간 저장 경로
                 output_platform=realtime_platform  # 출력 형식

@@ -11,7 +11,7 @@ from flask import request, jsonify
 from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
-from ..services.graph_builder import GraphBuilderService
+from ..config import get_graph_service
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
@@ -274,17 +274,6 @@ def build_graph():
     try:
         logger.info("=== 그래프 구축 시작 ===")
         
-        # 설정 확인
-        errors = []
-        if not Config.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY가 설정되지 않았습니다")
-        if errors:
-            logger.error(f"설정 오류: {errors}")
-            return jsonify({
-                "success": False,
-                "error": "설정 오류: " + "; ".join(errors)
-            }), 500
-        
         # 요청 파싱
         data = request.get_json() or {}
         project_id = data.get('project_id')
@@ -374,80 +363,21 @@ def build_graph():
                 )
                 
                 # 그래프 구축 서비스 생성
-                builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
-                
-                # 청크 분할
-                task_manager.update_task(
-                    task_id,
-                    message="텍스트 청크 분할 중...",
-                    progress=5
+                builder = get_graph_service()
+
+                # 그래프 구축 (로컬 kg-gen + Kuzu)
+                graph_id = builder.build_graph(
+                    text=text,
+                    ontology=ontology,
+                    graph_name=graph_name,
+                    chunk_size=chunk_size,
+                    progress_callback=lambda msg, ratio: task_manager.update_task(
+                        task_id, message=msg, progress=int(ratio * 95)
+                    )
                 )
-                chunks = TextProcessor.split_text(
-                    text, 
-                    chunk_size=chunk_size, 
-                    overlap=chunk_overlap
-                )
-                total_chunks = len(chunks)
-                
-                # 그래프 생성
-                task_manager.update_task(
-                    task_id,
-                    message="Zep 그래프 생성...",
-                    progress=10
-                )
-                graph_id = builder.create_graph(name=graph_name)
-                
-                # 프로젝트 graph_id 갱신
                 project.graph_id = graph_id
                 ProjectManager.save_project(project)
-                
-                # 온톨로지 설정
-                task_manager.update_task(
-                    task_id,
-                    message="온톨로지 정의 설정...",
-                    progress=15
-                )
-                builder.set_ontology(graph_id, ontology)
-                
-                # 텍스트 추가(progress_callback 시그니처: (msg, progress_ratio))
-                def add_progress_callback(msg, progress_ratio):
-                    progress = 15 + int(progress_ratio * 40)  # 15% - 55%
-                    task_manager.update_task(
-                        task_id,
-                        message=msg,
-                        progress=progress
-                    )
-                
-                task_manager.update_task(
-                    task_id,
-                    message=f"{total_chunks}개 텍스트 청크 추가 시작...",
-                    progress=15
-                )
-                
-                episode_uuids = builder.add_text_batches(
-                    graph_id, 
-                    chunks,
-                    batch_size=3,
-                    progress_callback=add_progress_callback
-                )
-                
-                # Zep 처리 완료 대기(각 episode processed 상태 확인)
-                task_manager.update_task(
-                    task_id,
-                    message="Zep 데이터 처리 대기 중...",
-                    progress=55
-                )
-                
-                def wait_progress_callback(msg, progress_ratio):
-                    progress = 55 + int(progress_ratio * 35)  # 55% - 90%
-                    task_manager.update_task(
-                        task_id,
-                        message=msg,
-                        progress=progress
-                    )
-                
-                builder._wait_for_episodes(episode_uuids, wait_progress_callback)
-                
+
                 # 그래프 데이터 조회
                 task_manager.update_task(
                     task_id,
@@ -553,13 +483,7 @@ def list_tasks():
 def get_graph_data(graph_id: str):
     """그래프 데이터(노드/엣지)를 조회한다."""
     try:
-        if not Config.ZEP_API_KEY:
-            return jsonify({
-                "success": False,
-                "error": "ZEP_API_KEY가 설정되지 않았습니다"
-            }), 500
-        
-        builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
+        builder = get_graph_service()
         graph_data = builder.get_graph_data(graph_id)
         
         return jsonify({
@@ -577,15 +501,9 @@ def get_graph_data(graph_id: str):
 
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
 def delete_graph(graph_id: str):
-    """Zep 그래프를 삭제한다."""
+    """그래프를 삭제한다."""
     try:
-        if not Config.ZEP_API_KEY:
-            return jsonify({
-                "success": False,
-                "error": "ZEP_API_KEY가 설정되지 않았습니다"
-            }), 500
-        
-        builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
+        builder = get_graph_service()
         builder.delete_graph(graph_id)
         
         return jsonify({

@@ -1,6 +1,6 @@
 """
 시뮬레이션API라우트
-Step2: Zep엔터티읽기, OASIS시뮬레이션 실행()
+Step2: 그래프엔터티읽기, OASIS시뮬레이션 실행()
 """
 
 import os
@@ -9,7 +9,7 @@ from flask import request, jsonify, send_file
 
 from . import simulation_bp
 from ..config import Config
-from ..services.zep_entity_reader import ZepEntityReader
+from ..config import get_graph_service
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
@@ -56,19 +56,13 @@ def get_graph_entities(graph_id: str):
         enrich: 엣지정보(true)
     """
     try:
-        if not Config.ZEP_API_KEY:
-            return jsonify({
-                "success": False,
-                "error": "ZEP_API_KEY설정"
-            }), 500
-        
         entity_types_str = request.args.get('entity_types', '')
         entity_types = [t.strip() for t in entity_types_str.split(',') if t.strip()] if entity_types_str else None
         enrich = request.args.get('enrich', 'true').lower() == 'true'
         
         logger.info(f"그래프엔터티: graph_id={graph_id}, entity_types={entity_types}, enrich={enrich}")
         
-        reader = ZepEntityReader()
+        reader = get_graph_service()
         result = reader.filter_defined_entities(
             graph_id=graph_id,
             defined_entity_types=entity_types,
@@ -93,13 +87,7 @@ def get_graph_entities(graph_id: str):
 def get_entity_detail(graph_id: str, entity_uuid: str):
     """엔터티상세정보"""
     try:
-        if not Config.ZEP_API_KEY:
-            return jsonify({
-                "success": False,
-                "error": "ZEP_API_KEY설정"
-            }), 500
-        
-        reader = ZepEntityReader()
+        reader = get_graph_service()
         entity = reader.get_entity_with_context(graph_id, entity_uuid)
         
         if not entity:
@@ -126,15 +114,9 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
 def get_entities_by_type(graph_id: str, entity_type: str):
     """타입엔터티"""
     try:
-        if not Config.ZEP_API_KEY:
-            return jsonify({
-                "success": False,
-                "error": "ZEP_API_KEY설정"
-            }), 500
-        
         enrich = request.args.get('enrich', 'true').lower() == 'true'
         
-        reader = ZepEntityReader()
+        reader = get_graph_service()
         entities = reader.get_entities_by_type(
             graph_id=graph_id,
             entity_type=entity_type,
@@ -370,7 +352,7 @@ def prepare_simulation():
     
     :
     1. 완료
-    2. Zep그래프읽기엔터티
+    2. 그래프읽기엔터티
     3. 엔터티생성OASIS Agent Profile()
     4. LLM생성시뮬레이션설정()
     5. 저장설정 파일
@@ -471,7 +453,7 @@ def prepare_simulation():
         # 호출prepareAgent
         try:
             logger.info(f"엔터티: graph_id={state.graph_id}")
-            reader = ZepEntityReader()
+            reader = get_graph_service()
             # 읽기엔터티(엣지정보, )
             filtered_preview = reader.filter_defined_entities(
                 graph_id=state.graph_id,
@@ -1396,7 +1378,7 @@ def generate_profiles():
         use_llm = data.get('use_llm', True)
         platform = data.get('platform', 'reddit')
         
-        reader = ZepEntityReader()
+        reader = get_graph_service()
         filtered = reader.filter_defined_entities(
             graph_id=graph_id,
             defined_entity_types=entity_types,
@@ -1453,7 +1435,7 @@ def start_simulation():
             "simulation_id": "sim_xxxx",          // 필수, 시뮬레이션 ID
             "platform": "parallel",                // 선택: twitter / reddit / parallel ()
             "max_rounds": 100,                     // 선택: 시뮬레이션, 시뮬레이션
-            "enable_graph_memory_update": false,   // 선택: AgentZep그래프
+            "enable_graph_memory_update": false,   // 선택: Agent그래프
             "force": false                         // 선택: 시작(중지실행진행 중레이션로그)
         }
 
@@ -1464,7 +1446,7 @@ def start_simulation():
         - 실행시뮬레이션
 
      enable_graph_memory_update:
-        - , 시뮬레이션에이전트(, , )Zep그래프
+        - , 시뮬레이션에이전트(, , )그래프
         - 그래프""시뮬레이션, 분석AI
         - 시뮬레이션프로젝트유효 graph_id
         - , API호출

@@ -952,9 +952,9 @@ def search_graph_tool():
                 "error": "graph_id  query를 입력해 주세요."
             }), 400
         
-        from ..services.zep_tools import ZepToolsService
-        
-        tools = ZepToolsService()
+        from ..services.local_graph_tools import LocalGraphToolsService
+
+        tools = LocalGraphToolsService()
         result = tools.search_graph(
             graph_id=graph_id,
             query=query,
@@ -996,9 +996,9 @@ def get_graph_statistics_tool():
                 "error": "graph_id를 입력해 주세요."
             }), 400
         
-        from ..services.zep_tools import ZepToolsService
-        
-        tools = ZepToolsService()
+        from ..services.local_graph_tools import LocalGraphToolsService
+
+        tools = LocalGraphToolsService()
         result = tools.get_graph_statistics(graph_id)
         
         return jsonify({

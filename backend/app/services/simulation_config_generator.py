@@ -23,6 +23,7 @@ from openai import OpenAI
 
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.action_routing import assign_tiers
 from .local_graph_service import EntityNode
 
 logger = get_logger('mirofish.simulation_config')
@@ -80,6 +81,9 @@ class AgentActivityConfig:
     
     # 영향력 가중치
     influence_weight: float = 1.0
+
+    # 에이전트 티어 (1=LLM, 2=hybrid, 3=rule-based)
+    tier: int = 1
 
 
 @dataclass  
@@ -327,7 +331,20 @@ class SimulationConfigGenerator:
             all_agent_configs.extend(batch_configs)
         
         reasoning_parts.append(f"Agent설정: 생성 {len(all_agent_configs)}개")
-        
+
+        # ========== 티어 할당 (Tier 1=LLM, Tier 2=hybrid, Tier 3=rule-based) ==========
+        logger.info("에이전트 티어 할당 중...")
+        agent_dicts = [asdict(a) for a in all_agent_configs]
+        agent_dicts = assign_tiers(agent_dicts)
+        # 티어 정보를 AgentActivityConfig에 반영
+        tier_map = {d["agent_id"]: d.get("tier", 1) for d in agent_dicts}
+        for agent_cfg in all_agent_configs:
+            agent_cfg.tier = tier_map.get(agent_cfg.agent_id, 1)
+        tier_counts = {1: 0, 2: 0, 3: 0}
+        for t in tier_map.values():
+            tier_counts[t] = tier_counts.get(t, 0) + 1
+        reasoning_parts.append(f"티어 할당: T1={tier_counts[1]}, T2={tier_counts[2]}, T3={tier_counts[3]}")
+
         # ==========  Agent ==========
         logger.info(" Agent...")
         event_config = self._assign_initial_post_agents(event_config, all_agent_configs)

@@ -128,6 +128,8 @@ except ImportError as e:
     print(": pip install oasis-ai camel-ai")
     sys.exit(1)
 
+from app.utils.action_routing import rule_based_action, compute_action_distribution, kl_divergence
+
 
 # IPC
 IPC_COMMANDS_DIR = "ipc_commands"
@@ -627,7 +629,13 @@ class TwitterSimulationRunner:
         # 시뮬레이션
         print("\n시작시뮬레이션...")
         start_time = datetime.now()
-        
+
+        # Convergence early stopping (Strategy 6)
+        previous_checkpoint_dist = None
+        check_interval = int(os.environ.get("CONVERGENCE_CHECK_INTERVAL", "5"))
+        convergence_threshold = float(os.environ.get("CONVERGENCE_THRESHOLD", "0.05"))
+        recent_round_actions = []
+
         for round_num in range(total_rounds):
             # 현재시뮬레이션
             simulated_minutes = round_num * minutes_per_round
@@ -642,15 +650,48 @@ class TwitterSimulationRunner:
             if not active_agents:
                 continue
             
-            # 
-            actions = {
-                agent: LLMAction()
-                for _, agent in active_agents
+            # Tier-based action routing
+            agent_configs_map = {
+                cfg.get("agent_id"): cfg
+                for cfg in self.config.get("agent_configs", [])
             }
-            
-            # 
+            actions = {}
+            for agent_id, agent in active_agents:
+                agent_cfg = agent_configs_map.get(agent_id, {})
+                agent_tier = agent_cfg.get("tier", 1)
+                if agent_tier == 1:
+                    actions[agent] = LLMAction()
+                elif agent_tier == 2:
+                    # Tier 2: LLM for content creation, rule-based for simple actions
+                    # Currently uses LLM - rule_based_action ready for ManualAction support
+                    actions[agent] = LLMAction()
+                else:  # tier 3
+                    # Tier 3: Rule-based only
+                    # TODO: convert to ManualAction when OASIS supports arbitrary action types
+                    actions[agent] = LLMAction()
+
+            #
             await self.env.step(actions)
-            
+
+            # Track actions for convergence detection
+            for agent_id, agent in active_agents:
+                agent_cfg = agent_configs_map.get(agent_id, {})
+                recent_round_actions.append({"action_type": agent_cfg.get("stance", "neutral")})
+
+            # Convergence early stopping check
+            if round_num % check_interval == 0 and round_num > 0:
+                try:
+                    current_dist = compute_action_distribution(recent_round_actions)
+                    if previous_checkpoint_dist is not None:
+                        div = kl_divergence(current_dist, previous_checkpoint_dist)
+                        if div < convergence_threshold:
+                            print(f"Round {round_num}: convergence detected (KL={div:.4f}), stopping early")
+                            break
+                    previous_checkpoint_dist = current_dist
+                    recent_round_actions = []
+                except Exception:
+                    pass  # Don't let convergence check break simulation
+
             # 진행률
             if (round_num + 1) % 10 == 0 or round_num == 0:
                 elapsed = (datetime.now() - start_time).total_seconds()

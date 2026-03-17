@@ -169,6 +169,8 @@ except ImportError as e:
     print(": pip install oasis-ai camel-ai")
     sys.exit(1)
 
+from app.utils.action_routing import rule_based_action, compute_action_distribution, kl_divergence
+
 
 # Twitter(INTERVIEW, INTERVIEWManualAction)
 TWITTER_ACTIONS = [
@@ -1220,40 +1222,66 @@ async def run_twitter_simulation(
             log_info(f": {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
     
     start_time = datetime.now()
-    
+
+    # Convergence early stopping (Strategy 6)
+    previous_checkpoint_dist = None
+    check_interval = int(os.environ.get("CONVERGENCE_CHECK_INTERVAL", "5"))
+    convergence_threshold = float(os.environ.get("CONVERGENCE_THRESHOLD", "0.05"))
+    recent_round_actions = []
+
+    # Build agent config lookup for tier-based routing
+    agent_configs_map = {
+        cfg.get("agent_id"): cfg
+        for cfg in config.get("agent_configs", [])
+    }
+
     for round_num in range(total_rounds):
-        # 
+        #
         if _shutdown_event and _shutdown_event.is_set():
             if main_logger:
                 main_logger.info(f",  {round_num + 1} 중지시뮬레이션")
             break
-        
+
         simulated_minutes = round_num * minutes_per_round
         simulated_hour = (simulated_minutes // 60) % 24
         simulated_day = simulated_minutes // (60 * 24) + 1
-        
+
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
-        
+
         # agent, round시작
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
-        
+
         if not active_agents:
             # agentround(actions_count=0)
             if action_logger:
                 action_logger.log_round_end(round_num + 1, 0)
             continue
-        
-        actions = {agent: LLMAction() for _, agent in active_agents}
+
+        # Tier-based action routing
+        actions = {}
+        for agent_id, agent in active_agents:
+            agent_cfg = agent_configs_map.get(agent_id, {})
+            agent_tier = agent_cfg.get("tier", 1)
+            if agent_tier == 1:
+                actions[agent] = LLMAction()
+            elif agent_tier == 2:
+                # Tier 2: LLM for content creation, rule-based for simple actions
+                actions[agent] = LLMAction()
+            else:  # tier 3
+                # Tier 3: Rule-based only
+                # TODO: convert to ManualAction when OASIS supports arbitrary action types
+                actions[agent] = LLMAction()
+
         await result.env.step(actions)
-        
-        # 
+
+        #
         actual_actions, last_rowid = fetch_new_actions_from_db(
             db_path, last_rowid, agent_names
         )
-        
+
         round_action_count = 0
         for action_data in actual_actions:
             if action_logger:
@@ -1266,23 +1294,38 @@ async def run_twitter_simulation(
                 )
                 total_actions += 1
                 round_action_count += 1
-        
+            recent_round_actions.append(action_data)
+
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
-        
+
+        # Convergence early stopping check
+        if round_num % check_interval == 0 and round_num > 0:
+            try:
+                current_dist = compute_action_distribution(recent_round_actions)
+                if previous_checkpoint_dist is not None:
+                    div = kl_divergence(current_dist, previous_checkpoint_dist)
+                    if div < convergence_threshold:
+                        log_info(f"Round {round_num}: convergence detected (KL={div:.4f}), stopping early")
+                        break
+                previous_checkpoint_dist = current_dist
+                recent_round_actions = []
+            except Exception:
+                pass  # Don't let convergence check break simulation
+
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
-    
+
     # :, Interview
-    
+
     if action_logger:
         action_logger.log_simulation_end(total_rounds, total_actions)
-    
+
     result.total_actions = total_actions
     elapsed = (datetime.now() - start_time).total_seconds()
     log_info(f"시뮬레이션 완료! : {elapsed:.1f}, : {total_actions}")
-    
+
     return result
 
 
@@ -1419,40 +1462,66 @@ async def run_reddit_simulation(
             log_info(f": {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
     
     start_time = datetime.now()
-    
+
+    # Convergence early stopping (Strategy 6)
+    previous_checkpoint_dist = None
+    check_interval = int(os.environ.get("CONVERGENCE_CHECK_INTERVAL", "5"))
+    convergence_threshold = float(os.environ.get("CONVERGENCE_THRESHOLD", "0.05"))
+    recent_round_actions = []
+
+    # Build agent config lookup for tier-based routing
+    agent_configs_map = {
+        cfg.get("agent_id"): cfg
+        for cfg in config.get("agent_configs", [])
+    }
+
     for round_num in range(total_rounds):
-        # 
+        #
         if _shutdown_event and _shutdown_event.is_set():
             if main_logger:
                 main_logger.info(f",  {round_num + 1} 중지시뮬레이션")
             break
-        
+
         simulated_minutes = round_num * minutes_per_round
         simulated_hour = (simulated_minutes // 60) % 24
         simulated_day = simulated_minutes // (60 * 24) + 1
-        
+
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
-        
+
         # agent, round시작
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
-        
+
         if not active_agents:
             # agentround(actions_count=0)
             if action_logger:
                 action_logger.log_round_end(round_num + 1, 0)
             continue
-        
-        actions = {agent: LLMAction() for _, agent in active_agents}
+
+        # Tier-based action routing
+        actions = {}
+        for agent_id, agent in active_agents:
+            agent_cfg = agent_configs_map.get(agent_id, {})
+            agent_tier = agent_cfg.get("tier", 1)
+            if agent_tier == 1:
+                actions[agent] = LLMAction()
+            elif agent_tier == 2:
+                # Tier 2: LLM for content creation, rule-based for simple actions
+                actions[agent] = LLMAction()
+            else:  # tier 3
+                # Tier 3: Rule-based only
+                # TODO: convert to ManualAction when OASIS supports arbitrary action types
+                actions[agent] = LLMAction()
+
         await result.env.step(actions)
-        
-        # 
+
+        #
         actual_actions, last_rowid = fetch_new_actions_from_db(
             db_path, last_rowid, agent_names
         )
-        
+
         round_action_count = 0
         for action_data in actual_actions:
             if action_logger:
@@ -1465,23 +1534,38 @@ async def run_reddit_simulation(
                 )
                 total_actions += 1
                 round_action_count += 1
-        
+            recent_round_actions.append(action_data)
+
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
-        
+
+        # Convergence early stopping check
+        if round_num % check_interval == 0 and round_num > 0:
+            try:
+                current_dist = compute_action_distribution(recent_round_actions)
+                if previous_checkpoint_dist is not None:
+                    div = kl_divergence(current_dist, previous_checkpoint_dist)
+                    if div < convergence_threshold:
+                        log_info(f"Round {round_num}: convergence detected (KL={div:.4f}), stopping early")
+                        break
+                previous_checkpoint_dist = current_dist
+                recent_round_actions = []
+            except Exception:
+                pass  # Don't let convergence check break simulation
+
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
-    
+
     # :, Interview
-    
+
     if action_logger:
         action_logger.log_simulation_end(total_rounds, total_actions)
-    
+
     result.total_actions = total_actions
     elapsed = (datetime.now() - start_time).total_seconds()
     log_info(f"시뮬레이션 완료! : {elapsed:.1f}, : {total_actions}")
-    
+
     return result
 
 

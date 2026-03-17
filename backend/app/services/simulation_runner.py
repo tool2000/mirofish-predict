@@ -20,7 +20,7 @@ from queue import Queue
 
 from ..config import Config
 from ..utils.logger import get_logger
-from .zep_graph_memory_updater import ZepGraphMemoryManager
+from .local_graph_memory_updater import LocalGraphMemoryManager
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
 
 logger = get_logger('mirofish.simulation_runner')
@@ -374,7 +374,7 @@ class SimulationRunner:
                 raise ValueError("그래프 graph_id")
             
             try:
-                ZepGraphMemoryManager.create_updater(simulation_id, graph_id)
+                LocalGraphMemoryManager.create_updater(simulation_id, graph_id)
                 cls._graph_memory_enabled[simulation_id] = True
                 logger.info(f"그래프: simulation_id={simulation_id}, graph_id={graph_id}")
             except Exception as e:
@@ -551,7 +551,7 @@ class SimulationRunner:
             # 중지그래프
             if cls._graph_memory_enabled.get(simulation_id, False):
                 try:
-                    ZepGraphMemoryManager.stop_updater(simulation_id)
+                    LocalGraphMemoryManager.stop_updater(simulation_id)
                     logger.info(f"중지그래프: simulation_id={simulation_id}")
                 except Exception as e:
                     logger.error(f"중지그래프실패: {e}")
@@ -599,7 +599,7 @@ class SimulationRunner:
         graph_memory_enabled = cls._graph_memory_enabled.get(state.simulation_id, False)
         graph_updater = None
         if graph_memory_enabled:
-            graph_updater = ZepGraphMemoryManager.get_updater(state.simulation_id)
+            graph_updater = LocalGraphMemoryManager.get_updater(state.simulation_id)
         
         try:
             with open(log_path, 'r', encoding='utf-8') as f:
@@ -807,7 +807,7 @@ class SimulationRunner:
         # 중지그래프
         if cls._graph_memory_enabled.get(simulation_id, False):
             try:
-                ZepGraphMemoryManager.stop_updater(simulation_id)
+                LocalGraphMemoryManager.stop_updater(simulation_id)
                 logger.info(f"중지그래프: simulation_id={simulation_id}")
             except Exception as e:
                 logger.error(f"중지그래프실패: {e}")
@@ -1201,7 +1201,7 @@ class SimulationRunner:
         
         # 중지그래프(stop_all 로그)
         try:
-            ZepGraphMemoryManager.stop_all()
+            LocalGraphMemoryManager.stop_all()
         except Exception as e:
             logger.error(f"중지그래프실패: {e}")
         cls._graph_memory_enabled.clear()

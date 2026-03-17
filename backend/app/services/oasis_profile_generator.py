@@ -16,11 +16,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from openai import OpenAI
-from zep_cloud.client import Zep
 
 from ..config import Config
 from ..utils.logger import get_logger
-from .zep_entity_reader import EntityNode, ZepEntityReader
+from .local_graph_service import LocalGraphService, EntityNode
 
 logger = get_logger('mirofish.oasis_profile')
 
@@ -178,35 +177,28 @@ class OasisProfileGenerator:
     ]
     
     def __init__(
-        self, 
+        self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model_name: Optional[str] = None,
-        zep_api_key: Optional[str] = None,
+        graph_service: Optional[LocalGraphService] = None,
         graph_id: Optional[str] = None
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
-        
+
         if not self.api_key:
             raise ValueError("LLM_API_KEY 설정")
-        
+
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url
         )
-        
-        # Zep
-        self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
-        self.zep_client = None
+
+        # LocalGraphService
+        self.graph_service = graph_service
         self.graph_id = graph_id
-        
-        if self.zep_api_key:
-            try:
-                self.zep_client = Zep(api_key=self.zep_api_key)
-            except Exception as e:
-                logger.warning(f"Zep실패: {e}")
     
     def generate_profile_from_entity(
         self, 
@@ -284,131 +276,17 @@ class OasisProfileGenerator:
     
     def _search_zep_for_entity(self, entity: EntityNode) -> Dict[str, Any]:
         """
-        Zep그래프검색엔터티정보
-        
-        Zep검색API, 검색edgesnodes.
-        병렬요청검색, .
-        
+        로컬 그래프에서 엔터티 관련 정보를 검색한다.
+
         Args:
-            entity: 엔터티노드
-            
+            entity: 엔터티 노드
+
         Returns:
-            facts, node_summaries, context
+            facts, node_summaries, context 딕셔너리
         """
-        import concurrent.futures
-        
-        if not self.zep_client:
+        if not self.graph_service or not self.graph_id:
             return {"facts": [], "node_summaries": [], "context": ""}
-        
-        entity_name = entity.name
-        
-        results = {
-            "facts": [],
-            "node_summaries": [],
-            "context": ""
-        }
-        
-        # graph_id검색
-        if not self.graph_id:
-            logger.debug(f"Zep:graph_id")
-            return results
-        
-        comprehensive_query = f"{entity_name}정보, , , 관계"
-        
-        def search_edges():
-            """검색엣지(사실/관계)- """
-            max_retries = 3
-            last_exception = None
-            delay = 2.0
-            
-            for attempt in range(max_retries):
-                try:
-                    return self.zep_client.graph.search(
-                        query=comprehensive_query,
-                        graph_id=self.graph_id,
-                        limit=30,
-                        scope="edges",
-                        reranker="rrf"
-                    )
-                except Exception as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        logger.debug(f"Zep엣지검색 {attempt + 1}회실패: {str(e)[:80]}, 진행 중")
-                        time.sleep(delay)
-                        delay *= 2
-                    else:
-                        logger.debug(f"Zep엣지검색 {max_retries}회실패: {e}")
-            return None
-        
-        def search_nodes():
-            """검색노드(엔터티요약)- """
-            max_retries = 3
-            last_exception = None
-            delay = 2.0
-            
-            for attempt in range(max_retries):
-                try:
-                    return self.zep_client.graph.search(
-                        query=comprehensive_query,
-                        graph_id=self.graph_id,
-                        limit=20,
-                        scope="nodes",
-                        reranker="rrf"
-                    )
-                except Exception as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        logger.debug(f"Zep노드검색 {attempt + 1}회실패: {str(e)[:80]}, 진행 중")
-                        time.sleep(delay)
-                        delay *= 2
-                    else:
-                        logger.debug(f"Zep노드검색 {max_retries}회실패: {e}")
-            return None
-        
-        try:
-            # 병렬edgesnodes검색
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                edge_future = executor.submit(search_edges)
-                node_future = executor.submit(search_nodes)
-                
-                # 
-                edge_result = edge_future.result(timeout=30)
-                node_result = node_future.result(timeout=30)
-            
-            # 엣지검색
-            all_facts = set()
-            if edge_result and hasattr(edge_result, 'edges') and edge_result.edges:
-                for edge in edge_result.edges:
-                    if hasattr(edge, 'fact') and edge.fact:
-                        all_facts.add(edge.fact)
-            results["facts"] = list(all_facts)
-            
-            # 노드검색
-            all_summaries = set()
-            if node_result and hasattr(node_result, 'nodes') and node_result.nodes:
-                for node in node_result.nodes:
-                    if hasattr(node, 'summary') and node.summary:
-                        all_summaries.add(node.summary)
-                    if hasattr(node, 'name') and node.name and node.name != entity_name:
-                        all_summaries.add(f"엔터티: {node.name}")
-            results["node_summaries"] = list(all_summaries)
-            
-            # 
-            context_parts = []
-            if results["facts"]:
-                context_parts.append("사실정보:\n" + "\n".join(f"- {f}" for f in results["facts"][:20]))
-            if results["node_summaries"]:
-                context_parts.append("엔터티:\n" + "\n".join(f"- {s}" for s in results["node_summaries"][:10]))
-            results["context"] = "\n\n".join(context_parts)
-            
-            logger.info(f"Zep완료: {entity_name},  {len(results['facts'])}건사실, {len(results['node_summaries'])}개노드")
-            
-        except concurrent.futures.TimeoutError:
-            logger.warning(f"Zep ({entity_name})")
-        except Exception as e:
-            logger.warning(f"Zep실패 ({entity_name}): {e}")
-        
-        return results
+        return self.graph_service.search_entity_context(self.graph_id, entity.name)
     
     def _build_entity_context(self, entity: EntityNode) -> str:
         """
@@ -705,7 +583,12 @@ class OasisProfileGenerator:
 
 반드시 아래 키를 포함한 JSON만 반환하세요:
 1. bio: 200자 이내의 간단한 소개
-2. persona: 2000자 이내의 상세 성격/행동 특성
+2. persona: 300자 이내의 구조화된 캐릭터 태그. 반드시 아래 형식을 따르세요:
+[성격:MBTI/핵심성향1/핵심성향2] [입장:주제에 대한 태도]
+[행동:게시빈도/글스타일/인용습관] [배경:직업/연령대/지역]
+[관계:핵심인물과의 관계 요약]
+
+예시: [성격:INTJ/비판적/분석적] [입장:기술낙관론] [행동:저빈도/긴글/데이터인용] [배경:금융분석가/40대/서울] [관계:X와 협력, Y와 대립]
 3. age: 정수
 4. gender: "male" 또는 "female"
 5. mbti: MBTI 문자열(예: INTJ, ENFP)
@@ -744,7 +627,12 @@ class OasisProfileGenerator:
 
 반드시 아래 키를 포함한 JSON만 반환하세요:
 1. bio: 200자 이내 소개
-2. persona: 2000자 이내 상세 설명
+2. persona: 300자 이내의 구조화된 기관 태그. 반드시 아래 형식을 따르세요:
+[성격:공식톤/핵심성향1/핵심성향2] [입장:주제에 대한 공식 태도]
+[행동:게시빈도/글스타일/인용습관] [배경:기관유형/설립시기/지역]
+[관계:핵심기관·인물과의 관계 요약]
+
+예시: [성격:ISTJ/보수적/권위적] [입장:정책옹호] [행동:고빈도/공식보도/통계인용] [배경:정부기관/1960년대/서울] [관계:A부처와 협력, B단체와 대립]
 3. age: 30 (고정)
 4. gender: "other" (고정)
 5. mbti: "ISTJ" (기본값)

@@ -8,8 +8,11 @@ import kuzu
 @pytest.fixture
 def tmp_kuzu_db():
     """Create a temporary Kuzu database for testing."""
-    tmp_dir = tempfile.mkdtemp(prefix="kuzu_test_")
-    db = kuzu.Database(tmp_dir)
+    # Kuzu >= 0.11 requires that the database path does NOT already exist
+    # as a directory. Use a subdirectory name inside a temp dir.
+    parent = tempfile.mkdtemp(prefix="kuzu_test_parent_")
+    db_path = os.path.join(parent, "db")
+    db = kuzu.Database(db_path)
     conn = kuzu.Connection(db)
     # Create schema
     conn.execute("""
@@ -31,5 +34,5 @@ def tmp_kuzu_db():
             created_at STRING
         )
     """)
-    yield tmp_dir, db, conn
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    yield db_path, db, conn
+    shutil.rmtree(parent, ignore_errors=True)

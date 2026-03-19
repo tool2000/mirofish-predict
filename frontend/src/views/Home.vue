@@ -121,14 +121,43 @@
         <!-- 우측: 인터랙션 콘솔 -->
         <div class="right-panel">
           <div class="console-box">
-            <!-- 업로드 영역 -->
-            <div class="console-section">
+            <!-- 기존 그래프 재사용 토글 -->
+            <div class="console-section reuse-section" v-if="completedProjects.length > 0">
+              <label class="reuse-toggle">
+                <input type="checkbox" v-model="useExistingGraph" :disabled="loading" />
+                <span class="toggle-label">기존 GraphDB 재사용</span>
+                <span class="toggle-count">{{ completedProjects.length }}개 프로젝트</span>
+              </label>
+
+              <div v-if="useExistingGraph" class="project-list">
+                <div
+                  v-for="proj in completedProjects"
+                  :key="proj.project_id"
+                  class="project-item"
+                  :class="{ selected: selectedProjectId === proj.project_id }"
+                  @click="selectedProjectId = proj.project_id"
+                >
+                  <div class="project-item-header">
+                    <span class="project-name">{{ proj.name || 'Unnamed Project' }}</span>
+                    <span class="project-status">{{ proj.status }}</span>
+                  </div>
+                  <div class="project-item-meta">
+                    <span>{{ proj.project_id }}</span>
+                    <span v-if="proj.graph_id">graph: {{ proj.graph_id.slice(0, 20) }}...</span>
+                    <span>{{ formatDate(proj.created_at) }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 업로드 영역 (기존 그래프 미사용 시에만 표시) -->
+            <div class="console-section" v-if="!useExistingGraph">
               <div class="console-header">
                 <span class="console-label">01 / 현실 시드</span>
                 <span class="console-meta">지원 형식: PDF, MD, TXT</span>
               </div>
-              
-              <div 
+
+              <div
                 class="upload-zone"
                 :class="{ 'drag-over': isDragOver, 'has-files': files.length > 0 }"
                 @dragover.prevent="handleDragOver"
@@ -145,13 +174,13 @@
                   style="display: none"
                   :disabled="loading"
                 />
-                
+
                 <div v-if="files.length === 0" class="upload-placeholder">
                   <div class="upload-icon">↑</div>
                   <div class="upload-title">파일 드래그 업로드</div>
                   <div class="upload-hint">또는 클릭해서 파일 선택</div>
                 </div>
-                
+
                 <div v-else class="file-list">
                   <div v-for="(file, index) in files" :key="index" class="file-item">
                     <span class="file-icon">📄</span>
@@ -207,9 +236,10 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
+import { listProjects } from '../api/graph'
 
 const router = useRouter()
 
@@ -226,12 +256,42 @@ const loading = ref(false)
 const error = ref('')
 const isDragOver = ref(false)
 
+// 기존 프로젝트 재사용
+const useExistingGraph = ref(false)
+const selectedProjectId = ref(null)
+const completedProjects = ref([])
+
 // 파일 입력 ref
 const fileInput = ref(null)
 
+// 완료된 프로젝트 목록 로드
+onMounted(async () => {
+  try {
+    const res = await listProjects(50)
+    if (res.data) {
+      completedProjects.value = res.data.filter(
+        p => p.status === 'graph_completed' && p.graph_id
+      )
+    }
+  } catch (e) {
+    // 프로젝트 목록 로드 실패는 무시 (새 프로젝트 생성은 항상 가능)
+  }
+})
+
+// 날짜 포맷
+const formatDate = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return d.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
 // 계산 속성: 제출 가능 여부
 const canSubmit = computed(() => {
-  return formData.value.simulationRequirement.trim() !== '' && files.value.length > 0
+  const hasPrompt = formData.value.simulationRequirement.trim() !== ''
+  if (useExistingGraph.value) {
+    return hasPrompt && selectedProjectId.value !== null
+  }
+  return hasPrompt && files.value.length > 0
 })
 
 // 파일 선택 트리거
@@ -291,17 +351,26 @@ const scrollToBottom = () => {
 // 시뮬레이션 시작 - 즉시 화면 전환, API 호출은 Process 페이지에서 수행
 const startSimulation = () => {
   if (!canSubmit.value || loading.value) return
-  
-  // 업로드 예정 데이터 저장
-  import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
-    setPendingUpload(files.value, formData.value.simulationRequirement)
-    
-    // Process 페이지로 즉시 이동(새 프로젝트 식별자 사용)
-    router.push({
-      name: 'Process',
-      params: { projectId: 'new' }
+
+  if (useExistingGraph.value && selectedProjectId.value) {
+    // 기존 프로젝트 재사용: 그래프 구축을 건너뛰고 Process 페이지로 이동
+    import('../store/pendingUpload.js').then(({ setExistingProject }) => {
+      setExistingProject(selectedProjectId.value, formData.value.simulationRequirement)
+      router.push({
+        name: 'Process',
+        params: { projectId: selectedProjectId.value }
+      })
     })
-  })
+  } else {
+    // 새 프로젝트: 기존 플로우
+    import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
+      setPendingUpload(files.value, formData.value.simulationRequirement)
+      router.push({
+        name: 'Process',
+        params: { projectId: 'new' }
+      })
+    })
+  }
 }
 </script>
 
@@ -658,6 +727,91 @@ const startSimulation = () => {
 .step-desc {
   font-size: 0.85rem;
   color: var(--gray-text);
+}
+
+/* 기존 GraphDB 재사용 */
+.reuse-section {
+  padding-bottom: 0 !important;
+}
+
+.reuse-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.reuse-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--orange);
+  cursor: pointer;
+}
+
+.toggle-label {
+  font-weight: 600;
+  color: var(--black);
+}
+
+.toggle-count {
+  font-size: 0.75rem;
+  color: #999;
+}
+
+.project-list {
+  margin-top: 12px;
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-item {
+  border: 1px solid #EEE;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: #FAFAFA;
+}
+
+.project-item:hover {
+  border-color: #999;
+  background: #F0F0F0;
+}
+
+.project-item.selected {
+  border-color: var(--orange);
+  background: #FFF5F0;
+}
+
+.project-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.project-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.project-status {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--orange);
+  font-weight: 600;
+}
+
+.project-item-meta {
+  display: flex;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: #999;
 }
 
 /* 우측 인터랙션 콘솔 */

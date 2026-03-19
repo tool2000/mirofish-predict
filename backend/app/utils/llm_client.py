@@ -4,11 +4,14 @@ OpenAI 호환 형식으로 통일해 호출합니다.
 """
 
 import json
+import logging
 import re
 from typing import Optional, Dict, Any, List
 from openai import OpenAI
 
 from ..config import Config
+
+logger = logging.getLogger('mirofish.llm_client')
 
 
 class LLMClient:
@@ -63,6 +66,9 @@ class LLMClient:
         
         response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content
+        finish_reason = response.choices[0].finish_reason
+        if finish_reason == 'length':
+            logger.warning(f"LLM 응답이 max_tokens 한도에 도달하여 잘렸습니다 (max_tokens={kwargs.get('max_tokens')})")
         # 일부 모델(예: MiniMax M2.5)은 content에 <think>를 포함하므로 제거
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         return content
@@ -71,7 +77,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
-        max_tokens: int = 4096
+        max_tokens: int = 100000
     ) -> Dict[str, Any]:
         """
         채팅 요청을 전송하고 JSON으로 반환합니다.
@@ -99,4 +105,5 @@ class LLMClient:
         try:
             return json.loads(cleaned_response)
         except json.JSONDecodeError:
-            raise ValueError(f"LLM이 반환한 JSON 형식이 올바르지 않습니다: {cleaned_response}")
+            logger.error(f"JSON 파싱 실패 — LLM 원본 응답 (앞 500자): {cleaned_response[:500]}")
+            raise ValueError(f"LLM이 반환한 JSON 형식이 올바르지 않습니다: {cleaned_response[:200]}")

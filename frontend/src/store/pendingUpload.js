@@ -8,7 +8,9 @@ import { reactive } from 'vue'
 const state = reactive({
   files: [],
   simulationRequirement: '',
-  isPending: false
+  isPending: false,
+  // 기존 프로젝트 재사용
+  existingProjectId: null
 })
 
 export function setPendingUpload(files, requirement) {
@@ -17,11 +19,18 @@ export function setPendingUpload(files, requirement) {
   state.isPending = true
 }
 
+export function setExistingProject(projectId, requirement) {
+  state.existingProjectId = projectId
+  state.simulationRequirement = requirement
+  state.isPending = true
+}
+
 export function getPendingUpload() {
   return {
     files: state.files,
     simulationRequirement: state.simulationRequirement,
-    isPending: state.isPending
+    isPending: state.isPending,
+    existingProjectId: state.existingProjectId
   }
 }
 
@@ -29,6 +38,7 @@ export function clearPendingUpload() {
   state.files = []
   state.simulationRequirement = ''
   state.isPending = false
+  state.existingProjectId = null
 }
 
 export default state

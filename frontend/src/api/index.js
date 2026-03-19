@@ -1,8 +1,14 @@
 import axios from 'axios'
 
 // axios 인스턴스 생성
+// dev 모드: 빈 baseURL → Vite 프록시 경유 (/api/* → 백엔드)
+// 프로덕션: VITE_API_BASE_URL 환경변수 사용
+const baseURL = import.meta.env.DEV
+  ? ''
+  : import.meta.env.VITE_API_BASE_URL || ''
+
 const service = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001',
+  baseURL,
   timeout: 300000, // 5분 타임아웃(온톨로지 생성은 시간이 오래 걸릴 수 있음)
   headers: {
     'Content-Type': 'application/json'

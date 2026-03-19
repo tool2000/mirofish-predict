@@ -179,6 +179,22 @@ const handleGoBack = () => {
 
 const initProject = async () => {
   addLog('Project view initialized.')
+
+  // 기존 프로젝트 재사용 확인
+  const pending = getPendingUpload()
+  if (pending.isPending && pending.existingProjectId) {
+    addLog(`Reusing existing project: ${pending.existingProjectId}`)
+    currentProjectId.value = pending.existingProjectId
+    clearPendingUpload()
+    await loadProject()
+    // 그래프가 이미 완료된 프로젝트라면 Step 2로 바로 이동
+    if (currentPhase.value === 2) {
+      currentStep.value = 2
+      addLog('Graph already built. Skipping to Step 2: Environment Setup.')
+    }
+    return
+  }
+
   if (currentProjectId.value === 'new') {
     await handleNewProject()
   } else {

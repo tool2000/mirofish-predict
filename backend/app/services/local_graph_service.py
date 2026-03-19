@@ -98,12 +98,22 @@ class LocalGraphService:
     def kg(self):
         """KGGen 인스턴스를 lazy 생성한다 (빌드 시점에만 사용)."""
         if self._kg is None:
+            import dspy
             from kg_gen import KGGen
+            # kg-gen 0.1.6의 init_model()은 api_base를 지원하지 않으므로
+            # KGGen 생성 후 LM을 api_base 포함 버전으로 교체
             self._kg = KGGen(
                 model=self._llm_model,
                 api_key=self._llm_api_key,
-                base_url=self._llm_base_url,
             )
+            lm = dspy.LM(
+                self._llm_model,
+                api_key=self._llm_api_key,
+                api_base=self._llm_base_url,
+                temperature=0.0,
+            )
+            self._kg.lm = lm
+            dspy.configure(lm=lm)
         return self._kg
 
     def get_connection(self) -> kuzu.Connection:

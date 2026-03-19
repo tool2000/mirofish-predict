@@ -68,3 +68,16 @@ export function getProject(projectId) {
     method: 'get'
   })
 }
+
+/**
+ * 프로젝트 목록 조회
+ * @param {Number} limit - 반환 개수 제한
+ * @returns {Promise}
+ */
+export function listProjects(limit = 50) {
+  return service({
+    url: '/api/graph/project/list',
+    method: 'get',
+    params: { limit }
+  })
+}
